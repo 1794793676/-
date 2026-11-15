@@ -136,6 +136,26 @@ class Application:
         if len(parts)==3 and parts[:2]==["api","attachments"] and method=="GET":
             item=self.store.get_attachment(actor,parts[2])
             return Response(200,Path(item["path"]).read_bytes(),{"Content-Type":item["content_type"],"Content-Disposition":"attachment; filename*=UTF-8''"+quote(item["filename"])})
+        if route=="/api/publications/pending" and method=="GET":
+            return self.json_response(200,self.store.pending_batches(actor))
+        if route=="/api/publications" and method=="GET":
+            return self.json_response(200,self.store.list_publications(actor))
+        if route=="/api/publications" and method=="POST":
+            data=self._body(headers,body)
+            result=self.store.publish_batch(actor,data.get("project_id"),data.get("batch"),
+                                           data.get("start_at"),data.get("end_at"),data.get("proposed_level"))
+            return self.json_response(201,result)
+        if len(parts)==3 and parts[:2]==["api","publications"] and method=="GET":
+            return self.json_response(200,self.store.get_publication(actor,parts[2]))
+        if len(parts)==4 and parts[:2]==["api","publications"] and parts[3]=="items" and method=="GET":
+            return self.json_response(200,self.store.publication_items_for_office(actor,parts[2]))
+        if len(parts)==4 and parts[:2]==["api","publications"] and parts[3]=="results" and method=="GET":
+            return self.json_response(200,self.store.list_publication_results(actor,parts[2]))
+        if len(parts)==4 and parts[:2]==["api","publications"] and parts[3]=="finalize" and method=="POST":
+            data=self._body(headers,body)
+            return self.json_response(200,self.store.finalize_batch(actor,parts[2],data.get("decisions"),data.get("objection_handled")))
+        if route=="/api/results/me" and method=="GET":
+            return self.json_response(200,self.store.get_my_results(actor))
         if route=="/api/applications":
             if method=="GET":
                 return self.json_response(200,self.store.list_applications(actor))
@@ -160,6 +180,8 @@ class Application:
             if len(parts)==4 and parts[3]=="college-review" and method=="POST":
                 data=self._body(headers,body)
                 return self.json_response(200,self.store.college_review(actor,app_id,data.get("decision"),data.get("opinion","")))
+            if len(parts)==4 and parts[3]=="result" and method=="GET":
+                return self.json_response(200,self.store.get_application_result(actor,app_id))
         raise AppError(404,"NOT_FOUND","接口不存在")
 
 
@@ -197,7 +219,7 @@ def create_server(store, host="127.0.0.1", port=0):
 
 
 def main():  # pragma: no cover -- CLI composition; production behavior tested below it.
-    parser=argparse.ArgumentParser(description="奖助学金US01–04本地教学演示")
+    parser=argparse.ArgumentParser(description="奖助学金US01–06本地教学演示")
     parser.add_argument("--port",type=int,default=8080)
     parser.add_argument("--data-dir",default="runtime")
     args=parser.parse_args()
