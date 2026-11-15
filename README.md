@@ -9,7 +9,7 @@
 | 后端 | Spring Boot 3.3 + Maven + Spring Data JPA |
 | 数据库 | H2 内嵌文件数据库（无需安装 MySQL，项目启动自动建表并写入演示数据） |
 | 前端 | HTML + CSS + 原生 JavaScript + Vue 3（本地文件，无需 npm） |
-| 通信 | REST + JSON，前端 `fetch`，通过 `X-User-Id` 请求头识别登录身份 |
+| 通信 | REST + JSON，前端 `fetch`，登录后通过 `X-Session-Token` 请求头认证 |
 
 ## 目录结构
 

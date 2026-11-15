@@ -15,7 +15,7 @@
 | --- | --- | --- |
 | 响应包装 | `{"ok":true,"data":...}` | **裸对象/裸数组**，没有 `ok`、没有 `data` |
 | 错误体 | `{"ok":false,"error":{"code":"...","message":"..."}}` | **`{"message":"中文提示"}`**，靠 HTTP 状态码区分类型，**没有错误码常量** |
-| 认证 | Cookie + `X-CSRF-Token` 双校验 | **只需请求头 `X-User-Id`**，无 Cookie、无 CSRF、无 session 接口 |
+| 认证 | Cookie + `X-CSRF-Token` 双校验 | 登录返回随机令牌，后续使用 `X-Session-Token` 请求头；无 Cookie、无 CSRF |
 | 时间格式 | 带时区的 ISO 字符串 | **不带时区的本地时间**，如 `2026-11-16T09:00` |
 | 附件 | base64 上传 + 附件下载接口 | **没有文件概念**，`materials` 只是材料名称字符串数组 |
 
@@ -35,14 +35,14 @@ http://localhost:8080
 
 ### 2.2 认证
 
-1. `POST /api/auth/login` 登录，响应里的 `id` 就是后续身份凭据。
+1. `POST /api/auth/login` 登录，保存响应里的 `token`。
 2. 之后**每个请求**都加：
 
 ```http
-X-User-Id: 3
+X-Session-Token: <登录响应中的 token>
 ```
 
-3. 没有 token、没有过期时间。前端把登录返回的用户对象整个存起来即可，退出登录 = 清掉本地存储。
+3. 令牌保存在服务端内存，服务重启后需重新登录。前端退出登录会清掉本地存储。
 
 ### 2.3 错误处理
 
@@ -58,10 +58,10 @@ X-User-Id: 3
 | --- | --- | --- |
 | 200 | 成功（注意：**重复提交也是 200**，见 4.3） | 用响应体 |
 | 400 | 业务规则不通过（缺字段、状态不对、时间窗关闭…） | 直接把 `message` 弹给用户 |
-| 401 | 未登录或 `X-User-Id` 无效 | 清本地登录态，回登录页 |
+| 401 | 未登录或令牌无效 | 清本地登录态，回登录页 |
 | 403 | 角色或数据范围不允许 | 提示"无权操作"，不要重试 |
 | 404 | 对象不存在 | 刷新列表 |
-| 500 | 服务端异常，`message` 形如 `服务器处理失败：...` | 提示"服务异常"，记日志 |
+| 500 | 服务端异常，`message` 为 `服务器处理失败` | 提示"服务异常"，记日志 |
 
 **关键**：`400` 的 `message` 已经是可直接展示的中文，前端不要自己再拼一套文案，否则会和后端提示对不上。判断成功与否只看 `response.ok`（或 `status === 200`），不要去解析 `message` 内容做分支。
 
@@ -163,13 +163,14 @@ stateDiagram-v2
   "name": "张三",
   "role": "STUDENT",
   "studentNo": "202411701202",
-  "college": "计算机学院"
+  "college": "计算机学院",
+  "token": "<随机令牌>"
 }
 ```
 
 失败：`400` `{"message":"请输入账号和密码"}` / `401` `{"message":"账号或密码错误"}`。
 
-> `id` 是后续 `X-User-Id` 的值，务必存下来。
+> 后续认证使用 `token`，用户 `id` 不再充当身份凭据。
 
 ### 4.2 通知列表 / 详情
 
@@ -360,7 +361,7 @@ stateDiagram-v2
 - `请选择要公示的记录`
 - `以下记录不符合公示条件，已阻止整批发布：JZ2026...（待辅导员审核）；记录#5（不属于本批次）`
 
-> ⚠️ 当前实现只校验"你传进来的 id 是否都合格"，**不校验"批次内全部 `PENDING_PUBLICITY` 是否都传了"**，因此存在只发一部分的路径。前端请自行做完整性校验：发布前先拿候选列表，筛出 `status === "PENDING_PUBLICITY"` 的记录，确认全部被选中再提交。这同样已列入 PR #8 的待评审项。
+> 后端会校验所选记录恰好覆盖批次内全部 `PENDING_PUBLICITY` 记录；漏选、重复选择及重复发布均返回 400。前端仍应先展示完整候选列表，便于用户确认。
 
 ### 4.10 学生处：公示名单（脱敏）/ 管理视图（不脱敏）
 
@@ -459,7 +460,7 @@ stateDiagram-v2
 登录与身份
 
 - [ ] 删掉 `/api/session`、`/api/logout`、`X-CSRF-Token`、`credentials: "include"` 相关代码。
-- [ ] 登录成功存 `id`，所有请求统一加 `X-User-Id` 头（建议封装在 `api()` 里）。
+- [ ] 登录成功存 `token`，所有需认证请求统一加 `X-Session-Token` 头（建议封装在 `api()` 里）。
 - [ ] 收到 `401` 统一清登录态回登录页。
 - [ ] 按 `role` 分流：`STUDENT` / `COUNSELOR` / `COLLEGE` / `AFFAIRS` 四套入口。
 
@@ -524,8 +525,8 @@ stateDiagram-v2
 ## 七、边界与已知限制（别当前端 bug 排查）
 
 1. **没有文件上传**。旧版有 `POST /api/uploads`，新版只有材料名称数组。若要真做附件，需后端新增接口，不是前端能补的。
-2. **认证可伪造**。`X-User-Id` 是普通请求头，改个数字就能变成别人。教学演示可用，联调时不要用真实学号姓名。
-3. **发布未强制整批**（见 4.9），前端需自行兜住完整性。
+2. **登录令牌暂存内存**。后端重启会使令牌失效，需重新登录。
+3. **发布必须覆盖全部待公示记录**（见 4.9），漏选或重复选择会被拒绝。
 4. **学院列表未按状态过滤**（见 4.8），前端需自己判状态。
 5. **无分页**。所有列表接口返回全量，数据量大了会卡，当前演示数据量级无影响。
 6. **无审批留痕表**。审核意见直接存在 `applications` 的字段上，没有独立审计流水，同一申请只保留最新一次意见。
@@ -542,17 +543,17 @@ curl -s -X POST localhost:8080/api/auth/login \
   -d '{"username":"zhang3","password":"123456"}'
 
 # 带身份的读取
-curl -s localhost:8080/api/notices -H 'X-User-Id: 6'
+curl -s localhost:8080/api/notices -H 'X-Session-Token: <学生登录返回的 token>'
 
 # 学生处发公示
 curl -s -X POST localhost:8080/api/publicity/publish \
-  -H 'Content-Type: application/json' -H 'X-User-Id: 5' \
+  -H 'Content-Type: application/json' -H 'X-Session-Token: <学生处登录返回的 token>' \
   -d '{"noticeId":1,"start":"2026-11-15T09:00","end":"2026-11-22T18:00","applicationIds":[1]}'
 
 # 整批确认
 curl -s -X POST localhost:8080/api/publicity/1/confirm \
-  -H 'Content-Type: application/json' -H 'X-User-Id: 5' \
+  -H 'Content-Type: application/json' -H 'X-Session-Token: <学生处登录返回的 token>' \
   -d '{"disputeHandled":true,"items":[{"applicationId":1,"approved":true}]}'
 ```
 
-> 上面的 `X-User-Id: 6` / `5` 是演示库里的自增主键，实际值以登录响应为准。
+> 示例请求中的令牌应使用对应角色登录响应里的 `token`。

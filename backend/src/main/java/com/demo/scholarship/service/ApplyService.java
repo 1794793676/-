@@ -9,6 +9,7 @@ import com.demo.scholarship.domain.enums.Role;
 import com.demo.scholarship.repo.ApplicationRepository;
 import com.demo.scholarship.repo.NoticeRepository;
 import org.springframework.stereotype.Service;
+import org.springframework.dao.DataIntegrityViolationException;
 
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
@@ -75,11 +76,7 @@ public class ApplyService {
 
         var existing = applicationRepository.findByStudentIdAndNoticeId(student.getId(), noticeId);
         if (existing.isPresent()) {
-            Map<String, Object> result = new LinkedHashMap<>();
-            result.put("duplicate", true);
-            result.put("message", "该批次已提交过申请，返回原申请编号：" + existing.get().getApplyNo());
-            result.put("application", AppView.full(existing.get()));
-            return result;
+            return duplicateResult(existing.get());
         }
 
         LocalDateTime now = LocalDateTime.now();
@@ -117,11 +114,25 @@ public class ApplyService {
         app.setRequiredMaterials(notice.getRequiredMaterials());
         app.setStatus(AppStatus.PENDING_COUNSELOR);
         app.setSubmitTime(now);
-        applicationRepository.save(app);
+        try {
+            applicationRepository.saveAndFlush(app);
+        } catch (DataIntegrityViolationException e) {
+            return applicationRepository.findByStudentIdAndNoticeId(student.getId(), noticeId)
+                    .map(ApplyService::duplicateResult)
+                    .orElseThrow(() -> e);
+        }
 
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("duplicate", false);
         result.put("message", "提交成功，申请编号：" + app.getApplyNo());
+        result.put("application", AppView.full(app));
+        return result;
+    }
+
+    private static Map<String, Object> duplicateResult(Application app) {
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("duplicate", true);
+        result.put("message", "该批次已提交过申请，返回原申请编号：" + app.getApplyNo());
         result.put("application", AppView.full(app));
         return result;
     }
