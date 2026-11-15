@@ -24,7 +24,7 @@ public class GlobalExceptionHandler {
     public ResponseEntity<Map<String, Object>> handleOther(Exception e) {
         log.error("请求处理失败", e);
         return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
-                .body(body("服务器处理失败：" + e.getMessage()));
+                .body(body("服务器处理失败"));
     }
 
     private Map<String, Object> body(String message) {

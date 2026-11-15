@@ -44,6 +44,9 @@ public class PublicityService {
     public Map<String, Object> publish(User affairs, Map<String, Object> body) {
         Long noticeId = asLong(body.get("noticeId"));
         Notice notice = loadNotice(noticeId);
+        if (notice.isPublicized()) {
+            throw new ApiException(400, "该批次已发布公示，不能重复发布");
+        }
 
         LocalDateTime start = parseTime(body.get("start"), "公示开始时间");
         LocalDateTime end = parseTime(body.get("end"), "公示结束时间");
@@ -73,6 +76,14 @@ public class PublicityService {
         }
         if (!invalid.isEmpty()) {
             throw new ApiException(400, "以下记录不符合公示条件，已阻止整批发布：" + String.join("；", invalid));
+        }
+        Set<Long> pendingIds = new HashSet<>();
+        for (Application app : applicationRepository.findByNoticeIdAndStatusOrderByIdAsc(
+                notice.getId(), AppStatus.PENDING_PUBLICITY)) {
+            pendingIds.add(app.getId());
+        }
+        if (ids.size() != pendingIds.size() || !new HashSet<>(ids).equals(pendingIds)) {
+            throw new ApiException(400, "必须覆盖该批次全部待公示记录，不允许遗漏或重复");
         }
 
         notice.setPublicityStart(start);

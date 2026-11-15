@@ -9,11 +9,16 @@ import org.springframework.stereotype.Service;
 
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.security.SecureRandom;
+import java.util.Base64;
+import java.util.concurrent.ConcurrentHashMap;
 
 @Service
 public class AuthService {
 
     private final UserRepository userRepository;
+    private final SecureRandom random = new SecureRandom();
+    private final Map<String, Long> sessions = new ConcurrentHashMap<>();
 
     public AuthService(UserRepository userRepository) {
         this.userRepository = userRepository;
@@ -28,20 +33,26 @@ public class AuthService {
         if (!user.getPassword().equals(password)) {
             throw new ApiException(401, "账号或密码错误");
         }
-        return userInfo(user);
+        Map<String, Object> result = userInfo(user);
+        byte[] bytes = new byte[32];
+        random.nextBytes(bytes);
+        String token = Base64.getUrlEncoder().withoutPadding().encodeToString(bytes);
+        sessions.put(token, user.getId());
+        result.put("token", token);
+        return result;
     }
 
     public User require(HttpServletRequest request) {
-        String value = request.getHeader("X-User-Id");
-        if (value == null || value.isBlank()) {
+        String token = request.getHeader("X-Session-Token");
+        if (token == null || token.isBlank()) {
             throw new ApiException(401, "请先登录");
         }
-        try {
-            return userRepository.findById(Long.parseLong(value))
-                    .orElseThrow(() -> new ApiException(401, "登录身份无效，请重新登录"));
-        } catch (NumberFormatException e) {
+        Long userId = sessions.get(token);
+        if (userId == null) {
             throw new ApiException(401, "登录身份无效，请重新登录");
         }
+        return userRepository.findById(userId)
+                .orElseThrow(() -> new ApiException(401, "登录身份无效，请重新登录"));
     }
 
     public User requireRole(HttpServletRequest request, Role role) {

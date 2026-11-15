@@ -8,6 +8,7 @@ import com.demo.scholarship.domain.enums.AppStatus;
 import com.demo.scholarship.repo.ApplicationRepository;
 import com.demo.scholarship.repo.NoticeRepository;
 import org.junit.jupiter.api.Test;
+import org.springframework.dao.DataIntegrityViolationException;
 
 import java.time.LocalDateTime;
 import java.util.List;
@@ -49,5 +50,23 @@ class ApplyServiceTest {
         assertEquals(400, error.getStatus());
         assertTrue(error.getMessage().contains("申请表"));
         verify(applications, never()).save(any());
+    }
+
+    @Test
+    void concurrentDuplicateReturnsOriginalApplication() {
+        Notice notice = new Notice(); notice.setId(10L);
+        notice.setApplyStart(LocalDateTime.now().minusDays(1));
+        notice.setApplyEnd(LocalDateTime.now().plusDays(1));
+        User student = new User(); student.setId(1L);
+        Application old = new Application(); old.setId(7L); old.setApplyNo("JZ-OLD");
+        old.setStatus(AppStatus.PENDING_COUNSELOR);
+        when(notices.findByIdAndPublishedTrue(10L)).thenReturn(Optional.of(notice));
+        when(applications.findByStudentIdAndNoticeId(1L, 10L))
+                .thenReturn(Optional.empty(), Optional.of(old));
+        when(applications.saveAndFlush(any())).thenThrow(new DataIntegrityViolationException("unique constraint"));
+        Map<String, Object> result = service.create(student,
+                Map.of("noticeId", 10, "reason", "申请理由", "materials", List.of()));
+        assertEquals(true, result.get("duplicate"));
+        assertEquals("JZ-OLD", ((Map<?, ?>) result.get("application")).get("applyNo"));
     }
 }

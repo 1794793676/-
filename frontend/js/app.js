@@ -82,7 +82,7 @@ async function apiRequest(method, path, body = null, withAuth = true) {
     const headers = {'Content-Type': 'application/json'};
     const user = JSON.parse(localStorage.getItem('user') || 'null');
     if (withAuth && user) {
-        headers['X-User-Id'] = user.id;
+        headers['X-Session-Token'] = user.token;
     }
     const res = await fetch(API + path, {
         method,
@@ -94,7 +94,7 @@ async function apiRequest(method, path, body = null, withAuth = true) {
     if (text) {
         try {
             data = JSON.parse(text);
-        } catch (e) {
+        } catch {
             data = null;
         }
     }

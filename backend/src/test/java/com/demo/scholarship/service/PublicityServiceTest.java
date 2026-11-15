@@ -47,4 +47,52 @@ class PublicityServiceTest {
         assertEquals(400,error.getStatus());
         verify(applications, never()).save(any());
     }
+
+    @Test
+    void publishRejectsPartialBatch() {
+        Notice notice = new Notice(); notice.setId(10L);
+        Application first = new Application(); first.setId(7L); first.setNoticeId(10L);
+        first.setStatus(AppStatus.PENDING_PUBLICITY);
+        Application second = new Application(); second.setId(8L); second.setNoticeId(10L);
+        second.setStatus(AppStatus.PENDING_PUBLICITY);
+        when(notices.findById(10L)).thenReturn(Optional.of(notice));
+        when(applications.findById(7L)).thenReturn(Optional.of(first));
+        when(applications.findByNoticeIdAndStatusOrderByIdAsc(10L, AppStatus.PENDING_PUBLICITY))
+                .thenReturn(List.of(first, second));
+        assertEquals(400, assertThrows(ApiException.class, () -> service.publish(new User(),
+                publishBody(List.of(7)))).getStatus());
+        verify(notices, never()).save(any());
+        verify(applications, never()).save(any());
+    }
+
+    @Test
+    void publishRejectsAlreadyPublicizedBatch() {
+        Notice notice = new Notice(); notice.setId(10L); notice.setPublicized(true);
+        when(notices.findById(10L)).thenReturn(Optional.of(notice));
+        ApiException error = assertThrows(ApiException.class, () -> service.publish(new User(),
+                publishBody(List.of(7))));
+        assertEquals(400, error.getStatus());
+        assertTrue(error.getMessage().contains("不能重复发布"));
+        verify(notices, never()).save(any());
+    }
+
+    @Test
+    void publishCompleteBatchSucceeds() {
+        Notice notice = new Notice(); notice.setId(10L);
+        Application app = new Application(); app.setId(7L); app.setNoticeId(10L);
+        app.setStatus(AppStatus.PENDING_PUBLICITY);
+        when(notices.findById(10L)).thenReturn(Optional.of(notice));
+        when(applications.findById(7L)).thenReturn(Optional.of(app));
+        when(applications.findByNoticeIdAndStatusOrderByIdAsc(10L, AppStatus.PENDING_PUBLICITY))
+                .thenReturn(List.of(app));
+        Map<String, Object> result = service.publish(new User(), publishBody(List.of(7)));
+        assertEquals(1, result.get("count"));
+        assertTrue(notice.isPublicized());
+        assertEquals(AppStatus.PUBLICIZING, app.getStatus());
+    }
+
+    private Map<String, Object> publishBody(List<Integer> ids) {
+        return Map.of("noticeId", 10, "start", LocalDateTime.now().toString(),
+                "end", LocalDateTime.now().plusDays(1).toString(), "applicationIds", ids);
+    }
 }
