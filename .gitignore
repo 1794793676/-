@@ -1,0 +1,21 @@
+# Python cache and test output
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage*
+htmlcov/
+.test-tmp/
+
+# Local environments and runtime data
+.venv/
+venv/
+runtime/
+.env
+.env.*
+!.env.example
+
+# IDE and OS files
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
