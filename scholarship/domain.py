@@ -20,6 +20,8 @@ FIELDS = [{"key":"phone", "label":"联系电话"}, {"key":"application_reason", 
 MATERIALS = [{"key":"transcript", "label":"成绩单"}, {"key":"proof", "label":"证明材料"}]
 COLLEGE_REVIEWERS = [("college1","周老师（演示）","college_reviewer","计算机学院",None),
                      ("college2","吴老师（演示）","college_reviewer","文学院",None)]
+STUDENT_AFFAIRS = [("office1","学生处老师（演示）","student_affairs","学生处",None)]
+PUBLIC_ITEM_FIELDS = ("masked_name","masked_student_id","college","project_name","proposed_level")
 
 
 class AppError(Exception):
@@ -65,6 +67,7 @@ class Store:
               CREATE INDEX IF NOT EXISTS attachment_application ON attachments(application_id);
             """)
         self.migrate_college_review()
+        self.migrate_publication_results()
 
     @contextmanager
     def connection(self):
@@ -82,6 +85,30 @@ class Store:
         with self.connection() as con:
             con.executemany("INSERT OR IGNORE INTO users VALUES (?,?,?,?,?)", COLLEGE_REVIEWERS)
             con.execute("CREATE INDEX IF NOT EXISTS application_status ON applications(status)")
+
+    def migrate_publication_results(self):
+        """US05/US06: 幂等补齐学生处账号与公示/结果表，不对既有表做任何 ALTER。"""
+        with self.connection() as con:
+            con.executemany("INSERT OR IGNORE INTO users VALUES (?,?,?,?,?)", STUDENT_AFFAIRS)
+            con.executescript("""
+              CREATE TABLE IF NOT EXISTS publications (
+                id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id),
+                batch TEXT NOT NULL, proposed_level TEXT NOT NULL,
+                start_at TEXT NOT NULL, end_at TEXT NOT NULL,
+                published_by TEXT NOT NULL REFERENCES users(id), published_at TEXT NOT NULL,
+                status TEXT NOT NULL, objection_handled INTEGER NOT NULL DEFAULT 0,
+                confirmed_by TEXT, confirmed_at TEXT);
+              CREATE TABLE IF NOT EXISTS publication_items (
+                publication_id TEXT NOT NULL REFERENCES publications(id),
+                application_id TEXT NOT NULL REFERENCES applications(id),
+                PRIMARY KEY (publication_id, application_id));
+              CREATE TABLE IF NOT EXISTS results (
+                application_id TEXT PRIMARY KEY REFERENCES applications(id),
+                publication_id TEXT NOT NULL REFERENCES publications(id),
+                decision TEXT NOT NULL, reason TEXT NOT NULL DEFAULT '',
+                confirmed_by TEXT NOT NULL, confirmed_at TEXT NOT NULL);
+              CREATE INDEX IF NOT EXISTS publication_batch ON publications(project_id,batch);
+            """)
 
     def seed_demo(self):
         now = self.clock()
@@ -253,8 +280,10 @@ class Store:
                 rows=con.execute("SELECT a.*,u.name AS student_name FROM applications a JOIN users u ON a.student_id=u.id WHERE a.student_id=? ORDER BY submitted_at DESC",(actor,)).fetchall()
             elif user["role"]=="college_reviewer":
                 rows=con.execute("SELECT a.*,u.name AS student_name FROM applications a JOIN users u ON a.student_id=u.id WHERE u.college=? ORDER BY submitted_at DESC",(user["college"],)).fetchall()
-            else:
+            elif user["role"]=="counselor":
                 rows=con.execute("SELECT a.*,u.name AS student_name FROM applications a JOIN users u ON a.student_id=u.id WHERE u.counselor_id=? ORDER BY submitted_at DESC",(actor,)).fetchall()
+            else:
+                raise AppError(403,"FORBIDDEN","该角色不通过申请列表读取数据，请使用公示与结果接口")
             return [self._application(con,r) for r in rows]
 
     def get_application(self, actor, application_id):
@@ -324,3 +353,239 @@ class Store:
         with self.connection() as con:
             self._authorized_application(con,user,application_id)
             return [dict(r) for r in con.execute("SELECT * FROM reviews WHERE application_id=? ORDER BY reviewed_at,id",(application_id,))]
+
+    # ---- US05 学生处整批公示 / US06 进度与最终结果 ----
+
+    @staticmethod
+    def _affairs(user):
+        if user["role"]!="student_affairs":
+            raise AppError(403,"FORBIDDEN","仅学生处可发布公示与确认最终结果")
+
+    @staticmethod
+    def _mask_name(name):
+        base=str(name).split("（")[0].split("(")[0].strip()
+        return (base[0] if base else "*")+"**"
+
+    @staticmethod
+    def _mask_student_id(student_id):
+        text=str(student_id)
+        return (text[0] if text else "*")+"***"+(text[-1] if len(text)>1 else "")
+
+    @staticmethod
+    def _parse_window(value):
+        if not isinstance(value,str) or not value.strip():
+            raise AppError(400,"INVALID_WINDOW","公示起止时间不能为空")
+        try:
+            moment=datetime.fromisoformat(value)
+        except ValueError:
+            raise AppError(400,"INVALID_WINDOW","公示起止时间必须是ISO 8601格式") from None
+        if moment.tzinfo is None:
+            moment=moment.replace(tzinfo=timezone.utc)
+        return moment
+
+    def _publication_meta(self, con, row):
+        project=con.execute("SELECT name FROM projects WHERE id=?",(row["project_id"],)).fetchone()
+        return {"id":row["id"],"project_id":row["project_id"],
+                "project_name":project["name"] if project else "",
+                "batch":row["batch"],"proposed_level":row["proposed_level"],
+                "start_at":row["start_at"],"end_at":row["end_at"],
+                "published_at":row["published_at"],"status":row["status"],
+                "objection_handled":bool(row["objection_handled"]),
+                "confirmed_by":row["confirmed_by"],"confirmed_at":row["confirmed_at"]}
+
+    def _publication_items(self, con, publication_id, level):
+        """公开名单：先查内部数据，再按白名单投影，任何新字段都进不了响应。"""
+        rows=con.execute("""SELECT u.name AS student_name,u.id AS student_id,u.college,p.name AS project_name
+                            FROM publication_items i
+                            JOIN applications a ON a.id=i.application_id
+                            JOIN users u ON u.id=a.student_id
+                            JOIN projects p ON p.id=a.project_id
+                            WHERE i.publication_id=? ORDER BY i.application_id""",(publication_id,)).fetchall()
+        raw=[{"masked_name":self._mask_name(r["student_name"]),
+              "masked_student_id":self._mask_student_id(r["student_id"]),
+              "college":r["college"],"project_name":r["project_name"],
+              "proposed_level":level} for r in rows]
+        return [{key:item[key] for key in PUBLIC_ITEM_FIELDS} for item in raw]
+
+    def pending_batches(self, actor):
+        """US05: 供学生处挑选可整批发布的「项目 + 批次」，只列还有待公示记录的组合。"""
+        self._affairs(self.get_user(actor))
+        with self.connection() as con:
+            rows=con.execute("""SELECT a.project_id,p.name AS project_name,a.batch,COUNT(*) AS pending_count
+                                FROM applications a JOIN projects p ON p.id=a.project_id
+                                WHERE a.status='待公示'
+                                GROUP BY a.project_id,a.batch ORDER BY p.name,a.batch""").fetchall()
+            return [dict(r) for r in rows]
+
+    def publish_batch(self, actor, project_id, batch, start_at, end_at, proposed_level):
+        """US05: 只把同一项目批次里全部「待公示」记录整批发布，任何不合条件整批不变。"""
+        self._affairs(self.get_user(actor))
+        for value in (project_id,batch,start_at,end_at,proposed_level):
+            if not isinstance(value,str) or not value.strip():
+                raise AppError(400,"INVALID_INPUT","项目、批次、公示时间与拟获等级均为必填字符串")
+        project_id,batch,proposed_level=project_id.strip(),batch.strip(),proposed_level.strip()
+        if len(proposed_level)>100:
+            raise AppError(400,"INVALID_LENGTH","拟获等级名称过长")
+        start,end=self._parse_window(start_at),self._parse_window(end_at)
+        if start>=end:
+            raise AppError(400,"INVALID_WINDOW","公示开始时间必须早于结束时间")
+        with self.connection() as con:
+            con.execute("BEGIN IMMEDIATE")
+            if con.execute("SELECT 1 FROM projects WHERE id=?",(project_id,)).fetchone() is None:
+                raise AppError(404,"NOT_FOUND","通知项目不存在")
+            if con.execute("SELECT 1 FROM publications WHERE project_id=? AND batch=? AND status IN ('公示中','已确认')",(project_id,batch)).fetchone():
+                raise AppError(409,"ALREADY_PUBLISHED","该项目批次已发布公示")
+            pending=con.execute("SELECT id FROM applications WHERE project_id=? AND batch=? AND status='待公示' ORDER BY id",(project_id,batch)).fetchall()
+            if not pending:
+                raise AppError(409,"BATCH_INCOMPLETE","该项目批次没有待公示记录")
+            unfinished=con.execute("SELECT COUNT(*) FROM applications WHERE project_id=? AND batch=? AND status IN ('待辅导员审核','待学院复核')",(project_id,batch)).fetchone()[0]
+            if unfinished:
+                raise AppError(409,"BATCH_INCOMPLETE","批次内仍有未完成的审核，整批不发布")
+            pub_id="PUB-"+uuid.uuid4().hex[:16].upper()
+            now=self.clock().isoformat()
+            con.execute("INSERT INTO publications VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                        (pub_id,project_id,batch.strip(),proposed_level.strip(),start.isoformat(),end.isoformat(),
+                         actor,now,"公示中",0,None,None))
+            con.executemany("INSERT INTO publication_items VALUES (?,?)",[(pub_id,r["id"]) for r in pending])
+            updated=con.executemany("UPDATE applications SET status='公示中' WHERE id=? AND status='待公示'",
+                                    [(r["id"],) for r in pending]).rowcount
+            if updated!=len(pending):
+                raise AppError(409,"BATCH_INCOMPLETE","批次状态发生变化，整批不发布")
+            row=con.execute("SELECT * FROM publications WHERE id=?",(pub_id,)).fetchone()
+            result=self._publication_meta(con,row)
+            result["items"]=self._publication_items(con,pub_id,row["proposed_level"])
+            result["item_count"]=len(pending)
+            return result
+
+    def publication_items_for_office(self, actor, publication_id):
+        """学生处确认前需要申请编号才能整批提交；身份字段仍只给脱敏值。"""
+        self._affairs(self.get_user(actor))
+        with self.connection() as con:
+            if con.execute("SELECT 1 FROM publications WHERE id=?",(publication_id,)).fetchone() is None:
+                raise AppError(404,"NOT_FOUND","公示批次不存在")
+            rows=con.execute("""SELECT i.application_id,u.name AS student_name,u.id AS student_id,
+                                       u.college,p.name AS project_name,pub.proposed_level
+                                FROM publication_items i
+                                JOIN publications pub ON pub.id=i.publication_id
+                                JOIN applications a ON a.id=i.application_id
+                                JOIN users u ON u.id=a.student_id
+                                JOIN projects p ON p.id=a.project_id
+                                WHERE i.publication_id=? ORDER BY i.application_id""",(publication_id,)).fetchall()
+            return [{"application_id":r["application_id"],
+                     "masked_name":self._mask_name(r["student_name"]),
+                     "masked_student_id":self._mask_student_id(r["student_id"]),
+                     "college":r["college"],"project_name":r["project_name"],
+                     "proposed_level":r["proposed_level"]} for r in rows]
+
+    def list_publications(self, actor):
+        self.get_user(actor)
+        with self.connection() as con:
+            return [self._publication_meta(con,r) for r in
+                    con.execute("SELECT * FROM publications ORDER BY published_at DESC,id")]
+
+    def get_publication(self, actor, publication_id):
+        """公开名单：登录可看，但响应只含元数据 + 严格白名单名单项。"""
+        self.get_user(actor)
+        with self.connection() as con:
+            row=con.execute("SELECT * FROM publications WHERE id=?",(publication_id,)).fetchone()
+            if row is None:
+                raise AppError(404,"NOT_FOUND","公示批次不存在")
+            result=self._publication_meta(con,row)
+            result["items"]=self._publication_items(con,publication_id,row["proposed_level"])
+            result["item_count"]=len(result["items"])
+            return result
+
+    def finalize_batch(self, actor, publication_id, decisions, objection_handled):
+        """US06: 公示期结束 + 线下异议已处理 + 整批决定齐全，才形成终态。"""
+        self._affairs(self.get_user(actor))
+        if objection_handled is not True:
+            raise AppError(409,"OBJECTION_UNHANDLED","需先确认线下异议已处理")
+        if not isinstance(decisions,dict) or not decisions:
+            raise AppError(400,"INVALID_INPUT","最终确认必须提供整批决定")
+        with self.connection() as con:
+            con.execute("BEGIN IMMEDIATE")
+            pub=con.execute("SELECT * FROM publications WHERE id=?",(publication_id,)).fetchone()
+            if pub is None:
+                raise AppError(404,"NOT_FOUND","公示批次不存在")
+            if pub["status"]!="公示中":
+                raise AppError(409,"ALREADY_FINALIZED","该公示批次已确认，不能重复提交",current_status=pub["status"])
+            if self.clock()<self._parse_window(pub["end_at"]):
+                raise AppError(409,"PUBLICATION_OPEN","公示期尚未结束，不能形成最终结果")
+            items=con.execute("""SELECT a.id,a.status FROM publication_items i
+                                 JOIN applications a ON a.id=i.application_id
+                                 WHERE i.publication_id=? ORDER BY a.id""",(publication_id,)).fetchall()
+            ids={r["id"] for r in items}
+            if not ids or set(decisions)!=ids:
+                raise AppError(409,"BATCH_INCOMPLETE","最终确认必须覆盖整批记录，禁止部分提交")
+            if any(r["status"]!="公示中" for r in items):
+                raise AppError(409,"BATCH_INCOMPLETE","批次内存在非公示中记录，整批不确认")
+            normalized=[]
+            for app_id in sorted(ids):
+                entry=decisions[app_id]
+                if not isinstance(entry,dict):
+                    raise AppError(400,"INVALID_DECISION","每条决定必须是对象")
+                decision,reason=entry.get("decision"),entry.get("reason","")
+                if decision not in ("approve","reject") or not isinstance(reason,str) or len(reason)>2000:
+                    raise AppError(400,"INVALID_DECISION","最终决定或原因格式无效")
+                reason=reason.strip()
+                if decision=="reject" and not reason:
+                    raise AppError(400,"REASON_REQUIRED","未获批必须填写非空原因")
+                normalized.append((app_id,decision,reason))
+            now=self.clock().isoformat()
+            for app_id,decision,reason in normalized:
+                con.execute("UPDATE applications SET status=?,rejection_reason=? WHERE id=? AND status='公示中'",
+                            ("已获批" if decision=="approve" else "未获批",reason if decision=="reject" else "",app_id))
+                con.execute("INSERT INTO results VALUES (?,?,?,?,?,?)",
+                            (app_id,publication_id,decision,reason,actor,now))
+            con.execute("UPDATE publications SET status='已确认',objection_handled=1,confirmed_by=?,confirmed_at=? WHERE id=? AND status='公示中'",
+                        (actor,now,publication_id))
+            row=con.execute("SELECT * FROM publications WHERE id=?",(publication_id,)).fetchone()
+            result=self._publication_meta(con,row)
+            result["items"]=self._publication_items(con,publication_id,row["proposed_level"])
+            result["item_count"]=len(normalized)
+            return result
+
+    def list_publication_results(self, actor, publication_id):
+        self._affairs(self.get_user(actor))
+        with self.connection() as con:
+            if con.execute("SELECT 1 FROM publications WHERE id=?",(publication_id,)).fetchone() is None:
+                raise AppError(404,"NOT_FOUND","公示批次不存在")
+            rows=con.execute("""SELECT r.application_id,r.decision,r.reason,r.confirmed_by,r.confirmed_at,a.status
+                                FROM results r JOIN applications a ON a.id=r.application_id
+                                WHERE r.publication_id=? ORDER BY r.application_id""",(publication_id,)).fetchall()
+            return [dict(r) for r in rows]
+
+    @staticmethod
+    def _result_view(row):
+        return {"application_id":row["application_id"],"project_name":row["project_name"],
+                "batch":row["batch"],"status":row["status"],"submitted_at":row["submitted_at"],
+                "final_reason":row["final_reason"] or "","confirmed_at":row["confirmed_at"],
+                "publication_id":row["publication_id"],"start_at":row["start_at"],"end_at":row["end_at"]}
+
+    def get_my_results(self, actor):
+        self._student(self.get_user(actor))
+        with self.connection() as con:
+            rows=con.execute("""SELECT a.id AS application_id,p.name AS project_name,a.batch,a.status,a.submitted_at,
+                                       COALESCE(r.reason,'') AS final_reason,r.confirmed_at,
+                                       pub.id AS publication_id,pub.start_at,pub.end_at
+                                FROM applications a JOIN projects p ON p.id=a.project_id
+                                LEFT JOIN results r ON r.application_id=a.id
+                                LEFT JOIN publications pub ON pub.id=r.publication_id
+                                WHERE a.student_id=? ORDER BY a.submitted_at DESC""",(actor,)).fetchall()
+            return [self._result_view(r) for r in rows]
+
+    def get_application_result(self, actor, application_id):
+        self._student(self.get_user(actor))
+        with self.connection() as con:
+            row=con.execute("""SELECT a.id AS application_id,p.name AS project_name,a.batch,a.status,a.submitted_at,
+                                      COALESCE(r.reason,'') AS final_reason,r.confirmed_at,
+                                      pub.id AS publication_id,pub.start_at,pub.end_at
+                               FROM applications a JOIN projects p ON p.id=a.project_id
+                               LEFT JOIN results r ON r.application_id=a.id
+                               LEFT JOIN publications pub ON pub.id=r.publication_id
+                               WHERE a.id=? AND a.student_id=?""",(application_id,actor)).fetchone()
+            if row is None:
+                if con.execute("SELECT 1 FROM applications WHERE id=?",(application_id,)).fetchone():
+                    raise AppError(403,"FORBIDDEN","无权查看他人申请的结果")
+                raise AppError(404,"NOT_FOUND","申请不存在")
+            return self._result_view(row)
