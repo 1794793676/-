@@ -1,0 +1,30 @@
+export default [{
+  files: ['js/app.js'],
+  languageOptions: {
+    ecmaVersion: 2022,
+    sourceType: 'script',
+    globals: {
+      Vue: 'readonly',
+      localStorage: 'readonly',
+      fetch: 'readonly',
+      window: 'readonly',
+      document: 'readonly',
+      console: 'readonly',
+      setTimeout: 'readonly',
+      clearTimeout: 'readonly',
+      alert: 'readonly',
+      URLSearchParams: 'readonly',
+      encodeURIComponent: 'readonly',
+      Date: 'readonly',
+    },
+  },
+  rules: {
+    'no-undef': 'error',
+    'no-unused-vars': 'warn',
+    'no-constant-condition': 'error',
+    'no-unreachable': 'error',
+    'no-dupe-args': 'error',
+    'no-duplicate-imports': 'error',
+    'eqeqeq': 'warn',
+  },
+}];
