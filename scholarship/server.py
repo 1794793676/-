@@ -157,6 +157,9 @@ class Application:
             if len(parts)==4 and parts[3]=="review" and method=="POST":
                 data=self._body(headers,body)
                 return self.json_response(200,self.store.review(actor,app_id,data.get("decision"),data.get("opinion","")))
+            if len(parts)==4 and parts[3]=="college-review" and method=="POST":
+                data=self._body(headers,body)
+                return self.json_response(200,self.store.college_review(actor,app_id,data.get("decision"),data.get("opinion","")))
         raise AppError(404,"NOT_FOUND","接口不存在")
 
 
@@ -194,7 +197,7 @@ def create_server(store, host="127.0.0.1", port=0):
 
 
 def main():  # pragma: no cover -- CLI composition; production behavior tested below it.
-    parser=argparse.ArgumentParser(description="奖助学金US01–03本地教学演示")
+    parser=argparse.ArgumentParser(description="奖助学金US01–04本地教学演示")
     parser.add_argument("--port",type=int,default=8080)
     parser.add_argument("--data-dir",default="runtime")
     args=parser.parse_args()
