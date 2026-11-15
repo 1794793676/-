@@ -1,0 +1,507 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>奖助学金管理系统 · 高校学工平台</title>
+    <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<div id="app" v-cloak>
+    <!-- 登录 -->
+    <div v-if="!currentUser" class="login-page">
+        <div class="login-card">
+            <div class="login-brand">
+                <div class="logo">奖</div>
+                <div>
+                    <h1>奖助学金管理系统</h1>
+                    <p>高校学工平台 · 教学演示</p>
+                </div>
+            </div>
+            <form @submit.prevent="login">
+                <label class="field">
+                    <span>账号</span>
+                    <input v-model="loginForm.username" placeholder="请输入账号" autocomplete="username">
+                </label>
+                <label class="field">
+                    <span>密码</span>
+                    <input v-model="loginForm.password" type="password" placeholder="请输入密码" autocomplete="current-password">
+                </label>
+                <button class="btn primary block" type="submit">登 录</button>
+            </form>
+            <div class="demo-accounts">
+                <p>演示账号（密码均为 123456，点击直接登录）</p>
+                <div class="account-grid">
+                    <button type="button" @click="quickLogin('zhang3')">学生 · 张三</button>
+                    <button type="button" @click="quickLogin('wangxm')">学生 · 王小明</button>
+                    <button type="button" @click="quickLogin('lisi')">学生 · 李四</button>
+                    <button type="button" @click="quickLogin('wangls')">辅导员 · 王老师</button>
+                    <button type="button" @click="quickLogin('liuls')">辅导员 · 刘老师</button>
+                    <button type="button" @click="quickLogin('jsxy')">学院审核 · 计算机</button>
+                    <button type="button" @click="quickLogin('rjxy')">学院审核 · 软件</button>
+                    <button type="button" @click="quickLogin('xsc')">学生处 · 张老师</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 主界面 -->
+    <template v-else>
+        <header class="topbar">
+            <div class="brand">奖助学金管理系统</div>
+            <nav class="nav">
+                <button v-for="tab in tabs" :key="tab.key"
+                        :class="['nav-item', { active: view === tab.key }]"
+                        @click="switchView(tab.key)">{{ tab.label }}</button>
+            </nav>
+            <div class="userbox">
+                <span class="user-name">{{ currentUser.name }}</span>
+                <span class="tag gray">{{ roleLabel(currentUser.role) }}</span>
+                <button class="btn ghost small" @click="logout">退出</button>
+            </div>
+        </header>
+
+        <div v-if="error" class="toast error" @click="error = ''">{{ error }}</div>
+        <div v-if="success" class="toast success" @click="success = ''">{{ success }}</div>
+
+        <main class="container">
+            <!-- 学生：通知公告 -->
+            <section v-if="view === 'notices'">
+                <div class="page-head">
+                    <h2>奖助学金通知</h2>
+                    <p>查看申请条件、材料要求与截止时间</p>
+                </div>
+                <div class="notice-grid">
+                    <article v-for="n in notices" :key="n.id"
+                             :class="['card', 'notice-card', { selected: selectedNotice && selectedNotice.id === n.id }]"
+                             @click="openNotice(n)">
+                        <div class="row-between">
+                            <h3>{{ n.projectName }}</h3>
+                            <span :class="['tag', n.ended ? 'gray' : (n.open ? 'green' : 'amber')]">
+                                {{ n.ended ? '申请已结束' : (n.open ? '申请中' : '未开始') }}
+                            </span>
+                        </div>
+                        <p class="muted">{{ n.batchName }} · 拟获等级：{{ n.level }}</p>
+                        <p class="clamp">{{ n.conditions }}</p>
+                        <p class="muted small">截止时间：{{ fmt(n.applyEnd) }}</p>
+                    </article>
+                    <p v-if="!notices.length" class="empty">暂无已发布的通知</p>
+                </div>
+
+                <div v-if="selectedNotice" class="card detail-card">
+                    <div class="row-between">
+                        <div>
+                            <h3>{{ selectedNotice.projectName }} · {{ selectedNotice.batchName }}</h3>
+                            <p class="muted">拟获等级：{{ selectedNotice.level }} ｜ 申请时间：{{ fmt(selectedNotice.applyStart) }} 至 {{ fmt(selectedNotice.applyEnd) }}</p>
+                        </div>
+                        <button class="btn ghost small" @click="selectedNotice = null">关闭</button>
+                    </div>
+                    <div class="block">
+                        <h4>申请条件</h4>
+                        <p>{{ selectedNotice.conditions }}</p>
+                    </div>
+                    <div class="block">
+                        <h4>必需材料</h4>
+                        <ul class="material-list">
+                            <li v-for="m in selectedNotice.materials" :key="m">{{ m }}</li>
+                        </ul>
+                    </div>
+
+                    <div v-if="myAppForSelected" class="notice">
+                        你已提交该批次申请，编号 <b>{{ myAppForSelected.applyNo }}</b>，当前状态：<b>{{ myAppForSelected.statusLabel }}</b>
+                    </div>
+                    <div v-else-if="selectedNotice.open" class="form-block">
+                        <h4>提交申请</h4>
+                        <label class="field">
+                            <span>申请理由 <em>*</em></span>
+                            <textarea v-model="applyForm.reason" rows="3" placeholder="请说明申请理由"></textarea>
+                        </label>
+                        <p class="field-label">勾选已准备好的材料 <em>*</em></p>
+                        <div class="checks">
+                            <label v-for="m in selectedNotice.materials" :key="m">
+                                <input type="checkbox" :value="m" v-model="applyForm.materials"> {{ m }}
+                            </label>
+                        </div>
+                        <button class="btn primary" @click="submitApplication">提交申请</button>
+                    </div>
+                    <p v-else class="notice">当前不在申请开放时间内，无法提交。</p>
+                </div>
+            </section>
+
+            <!-- 学生：我的申请 -->
+            <section v-if="view === 'myapps'">
+                <div class="page-head">
+                    <h2>我的申请</h2>
+                    <p>查看办理进度、审核意见与最终结果</p>
+                </div>
+                <div class="app-list">
+                    <article v-for="a in myApps" :key="a.id"
+                             :class="['card', 'app-card', { selected: selectedApp && selectedApp.id === a.id }]"
+                             @click="openMyApp(a)">
+                        <div class="row-between">
+                            <strong>{{ a.projectName }} · {{ a.batchName }}</strong>
+                            <span :class="['tag', statusClass(a.status)]">{{ a.statusLabel }}</span>
+                        </div>
+                        <p class="muted small">编号 {{ a.applyNo }} · 提交于 {{ fmt(a.submitTime) }}</p>
+                        <p v-if="a.status === 'PUBLICIZING'" class="hint">
+                            拟入选，公示中（公示截止 {{ fmt(publicityEndOf(a)) }}），公示不等于最终获批
+                        </p>
+                        <p v-if="a.status === 'REJECTED'" class="hint red">驳回理由：{{ a.counselorOpinion || a.collegeOpinion }}</p>
+                        <p v-if="a.status === 'REJECTED_UNSELECTED'" class="hint red">未获批原因：{{ a.finalReason }}</p>
+                    </article>
+                    <p v-if="!myApps.length" class="empty">你还没有提交过申请</p>
+                </div>
+
+                <div v-if="selectedApp" class="card detail-card">
+                    <app-detail :app="selectedApp"></app-detail>
+                    <div v-if="selectedApp.status === 'RETURNED'" class="form-block">
+                        <h4>补正后重新提交（V2）</h4>
+                        <p class="notice">补正意见：{{ selectedApp.correctionOpinion }} ｜ 截止时间：{{ fmt(selectedApp.correctionDeadline) }}</p>
+                        <label class="field">
+                            <span>申请理由</span>
+                            <textarea v-model="resubmitForm.reason" rows="3"></textarea>
+                        </label>
+                        <div class="checks">
+                            <label v-for="m in selectedApp.requiredMaterials" :key="m">
+                                <input type="checkbox" :value="m" v-model="resubmitForm.materials"> {{ m }}
+                            </label>
+                        </div>
+                        <button class="btn primary" @click="resubmit">重新提交</button>
+                    </div>
+                </div>
+            </section>
+
+            <!-- 学生：公示名单 -->
+            <section v-if="view === 'publicity'">
+                <div class="page-head">
+                    <h2>拟入选公示名单</h2>
+                    <p>公示名单已脱敏，仅显示姓名、学号后四位、学院、项目与拟获等级</p>
+                </div>
+                <div v-if="publicizedNotices.length" class="card">
+                    <label class="field inline-field">
+                        <span>选择公示批次</span>
+                        <select v-model="publicNoticeId" @change="loadPublicList">
+                            <option v-for="n in publicizedNotices" :key="n.id" :value="n.id">
+                                {{ n.projectName }} · {{ n.batchName }}
+                            </option>
+                        </select>
+                    </label>
+                    <div v-if="publicData">
+                        <p class="notice">
+                            公示期：{{ fmt(publicData.publicityStart) }} 至 {{ fmt(publicData.publicityEnd) }}
+                            ｜ 当前状态为“拟入选”，最终结果以学生处确认为准
+                        </p>
+                        <div class="table-wrap">
+                            <table>
+                                <thead>
+                                <tr>
+                                    <th>姓名</th>
+                                    <th>学号</th>
+                                    <th>学院</th>
+                                    <th>项目</th>
+                                    <th>拟获等级</th>
+                                    <th>状态</th>
+                                </tr>
+                                </thead>
+                                <tbody>
+                                <tr v-for="p in publicData.list" :key="p.id">
+                                    <td>{{ p.name }}</td>
+                                    <td>{{ p.studentNo }}</td>
+                                    <td>{{ p.college }}</td>
+                                    <td>{{ p.projectName }}</td>
+                                    <td>{{ p.level }}</td>
+                                    <td><span :class="['tag', statusClassByLabel(p.statusLabel)]">{{ p.statusLabel }}</span></td>
+                                </tr>
+                                <tr v-if="!publicData.list.length">
+                                    <td colspan="6" class="empty">暂无公示记录</td>
+                                </tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+                <p v-else class="empty">目前没有已发布的公示</p>
+            </section>
+
+            <!-- 辅导员 -->
+            <section v-if="view === 'counselor'">
+                <div class="page-head">
+                    <h2>学生申请审核</h2>
+                    <p>仅显示本人负责学生的申请；驳回必须填写理由，可发起退补</p>
+                </div>
+                <div class="filters">
+                    <button :class="['chip', { active: counselorFilter === 'PENDING' }]" @click="counselorFilter = 'PENDING'">待审核</button>
+                    <button :class="['chip', { active: counselorFilter === 'ALL' }]" @click="counselorFilter = 'ALL'">全部</button>
+                </div>
+                <div class="split">
+                    <div class="list-col">
+                        <article v-for="a in filteredCounselorApps" :key="a.id"
+                                 :class="['card', 'list-item', { selected: selectedApp && selectedApp.id === a.id }]"
+                                 @click="selectApp(a)">
+                            <div class="row-between">
+                                <strong>{{ a.studentName }}</strong>
+                                <span :class="['tag', statusClass(a.status)]">{{ a.statusLabel }}</span>
+                            </div>
+                            <p class="muted small">{{ a.projectName }} · {{ a.applyNo }}</p>
+                        </article>
+                        <p v-if="!filteredCounselorApps.length" class="empty">暂无待处理申请</p>
+                    </div>
+                    <div v-if="selectedApp" class="card detail-col">
+                        <app-detail :app="selectedApp"></app-detail>
+                        <div v-if="selectedApp.status === 'PENDING_COUNSELOR'" class="form-block">
+                            <h4>审核操作</h4>
+                            <label class="field">
+                                <span>审核意见（驳回时必填）</span>
+                                <textarea v-model="reviewForm.comment" rows="3" placeholder="通过可填写意见；驳回必须填写理由"></textarea>
+                            </label>
+                            <div class="btn-row">
+                                <button class="btn primary" @click="counselorAction('pass')">审核通过</button>
+                                <button class="btn danger" @click="counselorAction('reject')">驳回</button>
+                            </div>
+                            <hr>
+                            <h4>退补（V2）</h4>
+                            <label class="field">
+                                <span>补正意见 <em>*</em></span>
+                                <textarea v-model="reviewForm.opinion" rows="2" placeholder="请说明需要补正的内容"></textarea>
+                            </label>
+                            <label class="field">
+                                <span>补正截止时间 <em>*</em></span>
+                                <input type="datetime-local" v-model="reviewForm.deadline">
+                            </label>
+                            <button class="btn warn" @click="doCorrection">发起退补</button>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- 学院审核员 -->
+            <section v-if="view === 'college'">
+                <div class="page-head">
+                    <h2>学院复核</h2>
+                    <p>仅可复核本学院且状态为“待学院复核”的申请</p>
+                </div>
+                <div class="filters">
+                    <button :class="['chip', { active: collegeFilter === 'PENDING' }]" @click="collegeFilter = 'PENDING'">待复核</button>
+                    <button :class="['chip', { active: collegeFilter === 'ALL' }]" @click="collegeFilter = 'ALL'">全部</button>
+                </div>
+                <div class="split">
+                    <div class="list-col">
+                        <article v-for="a in filteredCollegeApps" :key="a.id"
+                                 :class="['card', 'list-item', { selected: selectedApp && selectedApp.id === a.id }]"
+                                 @click="selectApp(a)">
+                            <div class="row-between">
+                                <strong>{{ a.studentName }}</strong>
+                                <span :class="['tag', statusClass(a.status)]">{{ a.statusLabel }}</span>
+                            </div>
+                            <p class="muted small">{{ a.projectName }} · {{ a.applyNo }}</p>
+                        </article>
+                        <p v-if="!filteredCollegeApps.length" class="empty">暂无待复核申请</p>
+                    </div>
+                    <div v-if="selectedApp" class="card detail-col">
+                        <app-detail :app="selectedApp"></app-detail>
+                        <div v-if="selectedApp.status === 'PENDING_COLLEGE'" class="form-block">
+                            <h4>复核操作</h4>
+                            <label class="field">
+                                <span>复核意见（驳回时必填）</span>
+                                <textarea v-model="reviewForm.comment" rows="3" placeholder="复核通过可填写意见；驳回必须填写理由"></textarea>
+                            </label>
+                            <div class="btn-row">
+                                <button class="btn primary" @click="collegeAction('pass')">复核通过</button>
+                                <button class="btn danger" @click="collegeAction('reject')">驳回</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- 学生处：公示管理 -->
+            <section v-if="view === 'affairs'">
+                <div class="page-head">
+                    <h2>公示管理</h2>
+                    <p>发布拟入选公示、确认最终结果。公示中不等于已获批，公示结束后方可确认</p>
+                </div>
+
+                <div class="card">
+                    <h3>发布公示</h3>
+                    <label class="field inline-field">
+                        <span>选择批次</span>
+                        <select v-model="affairsNoticeId" @change="loadCandidates">
+                            <option v-for="n in notices" :key="n.id" :value="n.id">
+                                {{ n.projectName }} · {{ n.batchName }}
+                            </option>
+                        </select>
+                    </label>
+                    <div v-if="candidates.length" class="table-wrap">
+                        <table>
+                            <thead>
+                            <tr>
+                                <th>选择</th>
+                                <th>申请编号</th>
+                                <th>学生</th>
+                                <th>学院</th>
+                                <th>状态</th>
+                            </tr>
+                            </thead>
+                            <tbody>
+                            <tr v-for="c in candidates" :key="c.id">
+                                <td><input type="checkbox" :value="c.id" v-model="publishIds"></td>
+                                <td>{{ c.applyNo }}</td>
+                                <td>{{ c.studentName }}</td>
+                                <td>{{ c.college }}</td>
+                                <td><span :class="['tag', statusClass(c.status)]">{{ c.statusLabel }}</span></td>
+                            </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                    <p v-else class="empty">该批次暂无申请记录</p>
+                    <p class="muted small">默认勾选全部“待公示”记录；若勾选其他状态记录，后端会阻止整批发布（用于验证规则）。</p>
+                    <div class="form-row">
+                        <label class="field">
+                            <span>公示开始时间</span>
+                            <input type="datetime-local" v-model="publishStart">
+                        </label>
+                        <label class="field">
+                            <span>公示结束时间（演示可设 1-2 分钟后）</span>
+                            <input type="datetime-local" v-model="publishEnd">
+                        </label>
+                    </div>
+                    <button class="btn primary" @click="publish">发布公示</button>
+                </div>
+
+                <div class="card">
+                    <h3>公示结果确认</h3>
+                    <div v-if="publicizedNotices.length">
+                        <label class="field inline-field">
+                            <span>选择已公示批次</span>
+                            <select v-model="adminNoticeId" @change="loadAdminList">
+                                <option v-for="n in publicizedNotices" :key="n.id" :value="n.id">
+                                    {{ n.projectName }} · {{ n.batchName }}
+                                </option>
+                            </select>
+                        </label>
+                        <div v-if="adminData">
+                            <p class="notice">
+                                公示期：{{ fmt(adminData.publicityStart) }} 至 {{ fmt(adminData.publicityEnd) }}
+                            </p>
+                            <div class="table-wrap">
+                                <table>
+                                    <thead>
+                                    <tr>
+                                        <th>申请编号</th>
+                                        <th>学生</th>
+                                        <th>学院</th>
+                                        <th>状态</th>
+                                        <th>最终说明</th>
+                                    </tr>
+                                    </thead>
+                                    <tbody>
+                                    <tr v-for="a in adminData.list" :key="a.id">
+                                        <td>{{ a.applyNo }}</td>
+                                        <td>{{ a.studentName }}</td>
+                                        <td>{{ a.college }}</td>
+                                        <td><span :class="['tag', statusClass(a.status)]">{{ a.statusLabel }}</span></td>
+                                        <td class="muted">{{ a.finalReason || '-' }}</td>
+                                    </tr>
+                                    </tbody>
+                                </table>
+                            </div>
+
+                            <div v-if="adminPublicizing.length" class="form-block">
+                                <h4>确认最终结果</h4>
+                                <label class="check-line">
+                                    <input type="checkbox" v-model="disputeHandled"> 线下异议处理已完成
+                                </label>
+                                <div class="table-wrap">
+                                    <table>
+                                        <thead>
+                                        <tr>
+                                            <th>学生</th>
+                                            <th>确认结果</th>
+                                            <th>未获批原因</th>
+                                        </tr>
+                                        </thead>
+                                        <tbody>
+                                        <tr v-for="a in adminPublicizing" :key="a.id">
+                                            <td>{{ a.studentName }} · {{ a.college }}</td>
+                                            <td class="radio-cell">
+                                                <label><input type="radio" :value="true" v-model="confirmItems[a.id].approved"> 已获批</label>
+                                                <label><input type="radio" :value="false" v-model="confirmItems[a.id].approved"> 未获批</label>
+                                            </td>
+                                            <td>
+                                                <input v-model="confirmItems[a.id].reason"
+                                                       :disabled="confirmItems[a.id].approved !== false"
+                                                       placeholder="未获批时必填">
+                                            </td>
+                                        </tr>
+                                        </tbody>
+                                    </table>
+                                </div>
+                                <button class="btn primary" @click="confirmResults">确认最终结果</button>
+                            </div>
+                            <p v-else class="notice">该批次没有处于公示中的记录（可能已确认或尚未发布）。</p>
+                        </div>
+                    </div>
+                    <p v-else class="empty">暂无已发布公示的批次</p>
+                </div>
+            </section>
+
+            <!-- 学生处：统计分析 -->
+            <section v-if="view === 'stats'">
+                <div class="page-head">
+                    <h2>统计分析（V3）</h2>
+                    <p>按项目与学院分组统计申请总数、各状态数量及最终获批人数</p>
+                </div>
+                <div class="card">
+                    <div class="form-row">
+                        <label class="field">
+                            <span>批次</span>
+                            <select v-model="statsNoticeId">
+                                <option v-for="n in notices" :key="n.id" :value="n.id">
+                                    {{ n.projectName }} · {{ n.batchName }}
+                                </option>
+                            </select>
+                        </label>
+                        <label class="field">
+                            <span>学院（留空为全部）</span>
+                            <input v-model="statsCollege" placeholder="如：计算机学院">
+                        </label>
+                        <button class="btn primary align-end" @click="loadStats">查询统计</button>
+                    </div>
+                </div>
+                <div v-if="stats" class="card">
+                    <p class="notice">
+                        {{ stats.message }} ｜ 申请总数：<b>{{ stats.total }}</b> ｜ 最终获批：<b>{{ stats.approved }}</b>
+                    </p>
+                    <div class="table-wrap">
+                        <table>
+                            <thead>
+                            <tr>
+                                <th>项目</th>
+                                <th>学院</th>
+                                <th>申请总数</th>
+                                <th v-for="s in statusList" :key="s">{{ shortLabel(s) }}</th>
+                            </tr>
+                            </thead>
+                            <tbody>
+                            <tr v-for="g in stats.groups" :key="g.projectName + g.college">
+                                <td>{{ g.projectName }}</td>
+                                <td>{{ g.college }}</td>
+                                <td><b>{{ g.total }}</b></td>
+                                <td v-for="s in statusList" :key="s">{{ g.statusCounts[s] || 0 }}</td>
+                            </tr>
+                            <tr v-if="!stats.groups.length">
+                                <td :colspan="3 + statusList.length" class="empty">无匹配数据，各项统计为 0</td>
+                            </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </section>
+        </main>
+    </template>
+</div>
+
+<script src="js/vue.global.prod.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>
