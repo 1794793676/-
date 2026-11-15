@@ -18,6 +18,8 @@ DEMO_SALT = b"scholarship-local-teaching-only"
 DEMO_HASH = hashlib.pbkdf2_hmac("sha256", b"demo123", DEMO_SALT, 120000)
 FIELDS = [{"key":"phone", "label":"联系电话"}, {"key":"application_reason", "label":"申请理由"}]
 MATERIALS = [{"key":"transcript", "label":"成绩单"}, {"key":"proof", "label":"证明材料"}]
+COLLEGE_REVIEWERS = [("college1","周老师（演示）","college_reviewer","计算机学院",None),
+                     ("college2","吴老师（演示）","college_reviewer","文学院",None)]
 
 
 class AppError(Exception):
@@ -62,6 +64,7 @@ class Store:
                 opinion TEXT NOT NULL, reviewed_at TEXT NOT NULL);
               CREATE INDEX IF NOT EXISTS attachment_application ON attachments(application_id);
             """)
+        self.migrate_college_review()
 
     @contextmanager
     def connection(self):
@@ -73,6 +76,12 @@ class Store:
                 yield con
         finally:
             con.close()
+
+    def migrate_college_review(self):
+        """US04: 幂等补齐学院审核员与状态索引，不改动任何既有教学数据。"""
+        with self.connection() as con:
+            con.executemany("INSERT OR IGNORE INTO users VALUES (?,?,?,?,?)", COLLEGE_REVIEWERS)
+            con.execute("CREATE INDEX IF NOT EXISTS application_status ON applications(status)")
 
     def seed_demo(self):
         now = self.clock()
@@ -177,16 +186,20 @@ class Store:
         return item
 
     def _authorized_application(self, con, user, application_id):
-        row = con.execute("SELECT a.*, u.counselor_id, u.name AS student_name FROM applications a JOIN users u ON a.student_id=u.id WHERE a.id=?",(application_id,)).fetchone()
+        row = con.execute("SELECT a.*, u.counselor_id, u.name AS student_name, u.college AS college FROM applications a JOIN users u ON a.student_id=u.id WHERE a.id=?",(application_id,)).fetchone()
         if row is None:
             raise AppError(404,"NOT_FOUND","申请不存在")
-        if not ((user["role"]=="student" and row["student_id"]==user["id"]) or (user["role"]=="counselor" and row["counselor_id"]==user["id"])):
+        allowed = ((user["role"]=="student" and row["student_id"]==user["id"])
+                   or (user["role"]=="counselor" and row["counselor_id"]==user["id"])
+                   or (user["role"]=="college_reviewer" and row["college"]==user["college"]))
+        if not allowed:
             raise AppError(403,"FORBIDDEN","无权访问此申请或材料")
         return row
 
     def _application(self, con, row, duplicate=False):
         result = dict(row)
         result.pop("counselor_id",None)
+        result.pop("college",None)
         result["fields"] = json.loads(result["fields"])
         result["attachments"] = [self._public_attachment(r) for r in con.execute("SELECT * FROM attachments WHERE application_id=? ORDER BY material_key",(row["id"],))]
         result["duplicate"] = duplicate
@@ -238,6 +251,8 @@ class Store:
         with self.connection() as con:
             if user["role"]=="student":
                 rows=con.execute("SELECT a.*,u.name AS student_name FROM applications a JOIN users u ON a.student_id=u.id WHERE a.student_id=? ORDER BY submitted_at DESC",(actor,)).fetchall()
+            elif user["role"]=="college_reviewer":
+                rows=con.execute("SELECT a.*,u.name AS student_name FROM applications a JOIN users u ON a.student_id=u.id WHERE u.college=? ORDER BY submitted_at DESC",(user["college"],)).fetchall()
             else:
                 rows=con.execute("SELECT a.*,u.name AS student_name FROM applications a JOIN users u ON a.student_id=u.id WHERE u.counselor_id=? ORDER BY submitted_at DESC",(actor,)).fetchall()
             return [self._application(con,r) for r in rows]
@@ -268,6 +283,28 @@ class Store:
             status="待学院复核" if decision=="approve" else "已驳回"
             con.execute("UPDATE applications SET status=?,rejection_reason=? WHERE id=? AND status='待辅导员审核'",(status,opinion if decision=="reject" else "",application_id))
             con.execute("INSERT INTO reviews VALUES (?,?,?,?,?,?)",(uuid.uuid4().hex,application_id,actor,decision,opinion,self.clock().isoformat()))
+            return self._application(con,con.execute("SELECT * FROM applications WHERE id=?",(application_id,)).fetchone())
+
+    def college_review(self, actor, application_id, decision, opinion):
+        """US04: 学院审核员仅可处理本学院「待学院复核」的申请。"""
+        user=self.get_user(actor)
+        if user["role"]!="college_reviewer":
+            raise AppError(403,"FORBIDDEN","仅本学院审核员可复核申请")
+        with self.connection() as con:
+            con.execute("BEGIN IMMEDIATE")
+            row=self._authorized_application(con,user,application_id)
+            if row["status"]!="待学院复核":
+                raise AppError(409,"ALREADY_REVIEWED","申请已处理，不能重复复核",current_status=row["status"])
+            if decision not in ("approve","reject") or not isinstance(opinion,str) or len(opinion)>2000:
+                raise AppError(400,"INVALID_DECISION","复核动作或意见格式无效")
+            opinion=opinion.strip()
+            if decision=="reject" and not opinion:
+                raise AppError(400,"REASON_REQUIRED","驳回必须填写非空理由")
+            status="待公示" if decision=="approve" else "已驳回"
+            con.execute("UPDATE applications SET status=?,rejection_reason=? WHERE id=? AND status='待学院复核'",
+                        (status,opinion if decision=="reject" else "",application_id))
+            con.execute("INSERT INTO reviews VALUES (?,?,?,?,?,?)",
+                        (uuid.uuid4().hex,application_id,actor,decision,opinion,self.clock().isoformat()))
             return self._application(con,con.execute("SELECT * FROM applications WHERE id=?",(application_id,)).fetchone())
 
     def get_attachment(self, actor, attachment_id):
